@@ -1,20 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 mkdir -p /tmp/$USER/comgr
 export TMPDIR=/tmp/$USER
 export TEMP=/tmp/$USER
 export TMP=/tmp/$USER
 
-#!/usr/bin/env bash
-set -euo pipefail
-
 # ============================================================
 # Config
 # ============================================================
 PYTHON=${PYTHON:-python}
-# 确保这里指向你融合了“支持读取单个 CSV 并自动切分”的 python 脚本
 SCRIPT=${SCRIPT:-benchmark_tabicl_dynamic_v2.py}
 
-CKPT_DIR=${CKPT_DIR:-/vast/users/guangyi.chen/causal_group/zijian.li/LDM/tabicl_new/tabicl/stabe1/checkpoint/dir1}
+CKPT_DIR=${CKPT_DIR:-/vast/users/guangyi.chen/causal_group/zijian.li/dmir_crl/lyh/TabICLv2/TabICLv2/ckpt/TabICLv2}
 OUT_ROOT=${OUT_ROOT:-result/tabiclv2}
+
+# 新增：官方预训练权重版本设置
+OFFICIAL_VER=${OFFICIAL_VER:-"v2"}
 
 MIN_STEP="${MIN_STEP:-0}"
 SKIP_DONE="${SKIP_DONE:-1}"
@@ -30,7 +32,7 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
 # ============================================================
-# 核心新增：定义要跑的所有 Benchmark 队列
+# 定义要跑的所有 Benchmark 队列
 # 格式为 "任务别名:任务类型:数据集相对路径"
 # ============================================================
 BENCHMARKS=(
@@ -176,7 +178,100 @@ wait_until_dir_changes () {
 }
 
 # ============================================================
-# Main
+# [新增] Official Checkpoint Fallback
+# ============================================================
+NUM_CKPTS=$(find "${CKPT_DIR}" -maxdepth 1 -name "*.ckpt" 2>/dev/null | wc -l || echo 0)
+
+if [[ "${NUM_CKPTS}" -eq 0 ]]; then
+  echo "⚠️  No local checkpoints found in ${CKPT_DIR}."
+  echo "⬇️  Running official baseline (version: ${OFFICIAL_VER}) first..."
+  
+  ckpt_base="official_${OFFICIAL_VER}"
+  ckpt_abs="downloaded_automatically"
+  ckpt_out_base="${OUT_ROOT}/${ckpt_base}"
+
+  for b in "${BENCHMARKS[@]}"; do
+    IFS=':' read -r B_NAME B_TASK B_PATH <<< "${b}"
+    
+    ckpt_out="${ckpt_out_base}/${B_NAME}"
+    summary_txt="${ckpt_out}/tabicl_${B_NAME}.summary.txt"
+    all_out="${ckpt_out}/tabicl_${B_NAME}.ALL.csv"
+    run_log="${ckpt_out}/tabicl_${B_NAME}.run.log"
+    MASTER_CSV="${OUT_ROOT}/summary_all_ckpts_${B_NAME}.csv"
+    LOCK_FILE="${MASTER_CSV}.lock"
+
+    if [[ "${SKIP_DONE}" == "1" && -f "${summary_txt}" ]]; then
+      echo "   ⏭️  Skip Sub-Task [${B_NAME}] - Already done."
+      continue
+    fi
+
+    echo "===== Running [${B_NAME}] (${B_TASK}) with Official Weights =====" >&2
+
+    mkdir -p "${ckpt_out}"
+    started_at="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    CURRENT_ARGS="${COMMON_ARGS}"
+    if [[ "${B_TASK}" == "classification" ]]; then
+      CURRENT_ARGS="${CURRENT_ARGS} --softmax-temp 0.9"
+    fi
+
+    ${PYTHON} ${SCRIPT} \
+      --root "${B_PATH}" \
+      --out-dir "${ckpt_out}" \
+      --task "${B_TASK}" \
+      --all-out "${all_out}" \
+      --summary-txt "${summary_txt}" \
+      --checkpoint-version "${OFFICIAL_VER}" \
+      ${CURRENT_ARGS} \
+      > "${run_log}" 2>&1
+
+    finished_at="$(date '+%Y-%m-%d %H:%M:%S')"
+
+    if [[ "${B_TASK}" == "classification" ]]; then
+      main_metric="$(parse_summary_field "${summary_txt}" "avg_accuracy_ok")"
+    else
+      main_metric="$(parse_summary_field "${summary_txt}" "avg_r2_ok")"
+    fi
+
+    wall_seconds="$(parse_summary_field "${summary_txt}" "wall_seconds")"
+    discovered_datasets="$(parse_summary_field "${summary_txt}" "discovered_datasets")"
+    processed_datasets="$(parse_summary_field "${summary_txt}" "processed_datasets")"
+    failed_count="$(parse_summary_field "${summary_txt}" "failed_count")"
+
+    total_wall_seconds="$(${PYTHON} - <<PY
+def f(x):
+    try:
+        return float(x)
+    except:
+        return 0.0
+print(f"{f('${wall_seconds}'):.6f}")
+PY
+)"
+
+    {
+      flock 200
+      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "${ckpt_base}" \
+        "${ckpt_abs}" \
+        "${started_at}" \
+        "${finished_at}" \
+        "${total_wall_seconds}" \
+        "${main_metric}" \
+        "${wall_seconds}" \
+        "${discovered_datasets}" \
+        "${processed_datasets}" \
+        "${failed_count}"
+    } 200>"${LOCK_FILE}" >> "${MASTER_CSV}"
+
+    echo "   ✅ Done [${B_NAME}]. Metric: ${main_metric}"
+  done
+  
+  echo "✅ Official baseline evaluation complete. Now entering monitor mode..."
+fi
+
+
+# ============================================================
+# Main Loop (Waiting for new CKPTs)
 # ============================================================
 echo "✅ Multi-Benchmark Online ckpt consumer started."
 echo "   - MIN_STEP=${MIN_STEP}"
@@ -245,7 +340,6 @@ while true; do
     mkdir -p "${ckpt_out}"
     started_at="$(date '+%Y-%m-%d %H:%M:%S')"
 
-    # 动态构建针对该任务的运行参数
     CURRENT_ARGS="${COMMON_ARGS}"
     if [[ "${B_TASK}" == "classification" ]]; then
       CURRENT_ARGS="${CURRENT_ARGS} --softmax-temp 0.9"
