@@ -180,7 +180,7 @@ wait_until_dir_changes () {
 # ============================================================
 # [新增] Official Checkpoint Fallback
 # ============================================================
-NUM_CKPTS=$(find "${CKPT_DIR}" -maxdepth 1 -name "*.ckpt" 2>/dev/null | wc -l || echo 0)
+NUM_CKPTS=$( (find "${CKPT_DIR}" -maxdepth 1 -name "*.ckpt" 2>/dev/null || true) | wc -l )
 
 if [[ "${NUM_CKPTS}" -eq 0 ]]; then
   echo "⚠️  No local checkpoints found in ${CKPT_DIR}."
