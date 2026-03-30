@@ -221,7 +221,7 @@ if [[ "${NUM_CKPTS}" -eq 0 ]]; then
       --task "${B_TASK}" \
       --all-out "${all_out}" \
       --summary-txt "${summary_txt}" \
-      --checkpoint-version "${OFFICIAL_VER}" \
+      #--checkpoint-version "${OFFICIAL_VER}" \
       ${CURRENT_ARGS} \
       > "${run_log}" 2>&1
 
