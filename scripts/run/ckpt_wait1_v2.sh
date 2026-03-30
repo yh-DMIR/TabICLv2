@@ -16,7 +16,7 @@ CKPT_DIR=${CKPT_DIR:-/vast/users/guangyi.chen/causal_group/zijian.li/dmir_crl/ly
 OUT_ROOT=${OUT_ROOT:-result/tabiclv2}
 
 # 新增：官方预训练权重版本设置
-OFFICIAL_VER=${OFFICIAL_VER:-"v2"}
+OFFICIAL_VER=${OFFICIAL_VER:-"tabicl-regressor-v2-20260212"}
 
 MIN_STEP="${MIN_STEP:-0}"
 SKIP_DONE="${SKIP_DONE:-1}"
