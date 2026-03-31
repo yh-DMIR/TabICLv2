@@ -63,6 +63,20 @@ mkdir -p "${OUT_ROOT}"
 for b in "${BENCHMARKS[@]}"; do
   IFS=':' read -r B_NAME B_TASK B_PATH <<< "${b}"
   
+# ===== 新增：分类与回归的智能路由隔离逻辑 =====
+    if [[ "${ckpt_base}" == *"classifier"* || "${ckpt_base}" == *"cls"* ]]; then
+      if [[ "${B_TASK}" == "regression" ]]; then
+        echo "   ⏭️  智能跳过 [${B_NAME}] - 当前权重为分类模型，但任务是回归。"
+        continue
+      fi
+    elif [[ "${ckpt_base}" == *"regressor"* || "${ckpt_base}" == *"reg"* ]]; then
+      if [[ "${B_TASK}" == "classification" ]]; then
+        echo "   ⏭️  智能跳过 [${B_NAME}] - 当前权重为回归模型，但任务是分类。"
+        continue
+      fi
+    fi
+    # ===============================================
+
   MASTER_CSV="${OUT_ROOT}/summary_all_ckpts_${B_NAME}.csv"
   
   if [[ "${B_TASK}" == "classification" ]]; then
