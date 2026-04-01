@@ -3,11 +3,11 @@ import shutil
 from huggingface_hub import hf_hub_download
 
 # 你指定的监控目录
-target_dir = "/vast/users/guangyi.chen/causal_group/zijian.li/dmir_crl/lyh/TabICLv2/TabICLv2/ckpt/TabICLv2"
+target_dir = "/vast/users/guangyi.chen/causal_group/zijian.li/dmir_crl/lyh/TabICLv2/ckpt/TabICLv2"
 os.makedirs(target_dir, exist_ok=True)
 
 # 根据你提供的文档截图，精确的 v2 版本文件名
-repo_id = "yh-DMIR/TabICLv2"  # 官方 Hugging Face 仓库名
+repo_id = "jingang/TabICL"  # 官方 Hugging Face 仓库名
 ckpts = [
     "tabicl-classifier-v2-20260212.ckpt",
     "tabicl-regressor-v2-20260212.ckpt"

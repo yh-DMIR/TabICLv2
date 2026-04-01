@@ -4,7 +4,8 @@ import numpy as np
 import torch
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import root_mean_squared_error, r2_score
-from tabicl import TabICLRegressor # 导入你本地的代码
+from tabicl import TabICLRegressor 
+#from tabicl.sklearn.regressor import TabICLRegressor
 
 # 1. 基础配置
 MODEL_PATH = "ckpt/TabICLv2/tabicl-regressor-v2-20260212.ckpt"
