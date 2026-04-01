@@ -1,0 +1,9 @@
+discovered_datasets: 100
+processed_datasets: 100
+ok_count: 100
+failed_count: 0
+avg_r2_ok: 0.737636
+avg_rmse_ok: 14962.636920
+avg_mae_ok: 9976.178748
+wall_seconds: 153.469
+failed_datasets: (none)

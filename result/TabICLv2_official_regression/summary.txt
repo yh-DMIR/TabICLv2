@@ -1,0 +1,9 @@
+discovered_datasets: 148
+processed_datasets: 148
+ok_count: 147
+failed_count: 1
+avg_r2_ok: 0.752810
+avg_rmse_ok: 12455.629316
+avg_mae_ok: 7945.250975
+wall_seconds: 153.469
+failed_datasets: 44975__wave_energy.csv
