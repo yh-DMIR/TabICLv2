@@ -12,7 +12,7 @@ export TMP=/tmp/$USER
 PYTHON=${PYTHON:-python}
 SCRIPT=${SCRIPT:-benchmark_tabicl_dynamic_v2.py}
 
-CKPT_DIR=${CKPT_DIR:-/vast/users/guangyi.chen/causal_group/zijian.li/dmir_crl/lyh/TabICLv2/TabICLv2/ckpt/TabICLv2}
+CKPT_DIR=${CKPT_DIR:-/vast/users/guangyi.chen/causal_group/zijian.li/dmir_crl/lyh/TabICLv2/ckpt/TabICLv2}
 OUT_ROOT=${OUT_ROOT:-result/tabiclv2}
 
 # 新增：官方预训练权重版本设置
@@ -36,9 +36,9 @@ export MKL_NUM_THREADS=1
 # 格式为 "任务别名:任务类型:数据集相对路径"
 # ============================================================
 BENCHMARKS=(
-  "talent_cls:classification:dataset/talent_cls"
+  #"talent_cls:classification:dataset/talent_cls"
   "talent_reg:regression:dataset/talent_reg"
-  "tabarena_cls:classification:dataset/tabarena/cls"
+  #"tabarena_cls:classification:dataset/tabarena/cls"
   "tabarena_reg:regression:dataset/tabarena/reg"
   "ctr23:regression:dataset/ctr23"
 )
