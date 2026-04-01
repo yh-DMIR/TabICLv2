@@ -30,6 +30,7 @@ TARGET_CANDIDATES = ["target", "label", "y", "TARGET", "Label", "Y"]
 
 @dataclass
 class ResultRow:
+    dataset_group: str
     dataset_dir: str
     dataset_name: str
     n_train: int
@@ -51,6 +52,17 @@ def infer_target_column(df: pd.DataFrame) -> str:
     return df.columns[-1]
 
 
+def dataset_group_name(csv_path: Path) -> str:
+    path_str = csv_path.as_posix()
+    if "dataset/tabarena/reg" in path_str:
+        return "tabarena_reg"
+    if "dataset/talent_reg" in path_str:
+        return "talent_reg"
+    if "dataset/ctr23" in path_str:
+        return "ctr23"
+    return csv_path.parent.name
+
+
 def find_csv_files(data_dirs: List[Path]) -> List[Path]:
     csv_files: List[Path] = []
     for data_dir in data_dirs:
@@ -65,9 +77,14 @@ def evaluate_one_dataset(regressor, csv_path: Path, test_size: float, random_sta
         df = pd.read_csv(csv_path)
         target_col = infer_target_column(df)
         df = df.dropna(subset=[target_col])
-
         X = df.drop(columns=[target_col])
-        y = df[target_col]
+        y = pd.to_numeric(df[target_col], errors="coerce")
+        valid_mask = y.notna()
+        X = X.loc[valid_mask]
+        y = y.loc[valid_mask]
+
+        if len(X) < 2:
+            raise ValueError("Not enough valid rows after converting target column to numeric.")
 
         X_train, X_test, y_train, y_test = train_test_split(
             X,
@@ -89,6 +106,7 @@ def evaluate_one_dataset(regressor, csv_path: Path, test_size: float, random_sta
         mae = float(mean_absolute_error(y_test, y_pred))
 
         return ResultRow(
+            dataset_group=dataset_group_name(csv_path),
             dataset_dir=csv_path.parent.as_posix(),
             dataset_name=csv_path.name,
             n_train=int(len(X_train)),
@@ -104,6 +122,7 @@ def evaluate_one_dataset(regressor, csv_path: Path, test_size: float, random_sta
         )
     except Exception as exc:
         return ResultRow(
+            dataset_group=dataset_group_name(csv_path),
             dataset_dir=csv_path.parent.as_posix(),
             dataset_name=csv_path.name,
             n_train=0,
@@ -151,16 +170,23 @@ def worker_main(
             rows.append(row)
 
             if verbose:
-                print(
-                    f"[worker {worker_id} | gpu {gpu_id}] "
-                    f"[{row.status}] {row.dataset_name} r2={row.r2}"
-                )
+                if row.status == "ok":
+                    print(
+                        f"[worker {worker_id} | gpu {gpu_id}] "
+                        f"[ok] {row.dataset_name} r2={row.r2:.6f} rmse={row.rmse:.6f}"
+                    )
+                else:
+                    print(
+                        f"[worker {worker_id} | gpu {gpu_id}] "
+                        f"[fail] {row.dataset_name} error={row.error}"
+                    )
 
         pd.DataFrame([asdict(row) for row in rows]).to_csv(worker_out_csv, index=False)
     except Exception:
         crash_row = pd.DataFrame(
             [
                 {
+                    "dataset_group": "__worker__",
                     "dataset_dir": "__worker__",
                     "dataset_name": f"__WORKER_CRASH__{worker_id}",
                     "n_train": 0,
@@ -179,13 +205,13 @@ def worker_main(
         crash_row.to_csv(worker_out_csv, index=False)
 
 
-def write_summary(summary_path: Path, all_df: pd.DataFrame, csv_files: List[Path], wall_seconds: float) -> None:
-    ok_df = all_df[all_df["status"] == "ok"].copy() if len(all_df) else pd.DataFrame()
-    failed_df = all_df[all_df["status"] == "fail"].copy() if len(all_df) else pd.DataFrame()
+def write_summary(summary_path: Path, result_df: pd.DataFrame, csv_files: List[Path], wall_seconds: float) -> None:
+    ok_df = result_df[result_df["status"] == "ok"].copy() if len(result_df) else pd.DataFrame()
+    failed_df = result_df[result_df["status"] == "fail"].copy() if len(result_df) else pd.DataFrame()
 
     lines = [
         f"discovered_datasets: {len(csv_files)}",
-        f"processed_datasets: {len(all_df)}",
+        f"processed_datasets: {len(result_df)}",
         f"ok_count: {len(ok_df)}",
         f"failed_count: {len(failed_df)}",
         f"avg_r2_ok: {ok_df['r2'].mean():.6f}" if len(ok_df) else "avg_r2_ok: (none)",
@@ -201,6 +227,26 @@ def write_summary(summary_path: Path, all_df: pd.DataFrame, csv_files: List[Path
         lines.append("failed_datasets: (none)")
 
     summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_group_outputs(out_dir: Path, all_df: pd.DataFrame, csv_files: List[Path], wall_seconds: float) -> None:
+    grouped_csv_files: Dict[str, List[Path]] = {}
+    for csv_path in csv_files:
+        grouped_csv_files.setdefault(dataset_group_name(csv_path), []).append(csv_path)
+
+    for group_name, group_files in grouped_csv_files.items():
+        group_dir = out_dir / group_name
+        group_dir.mkdir(parents=True, exist_ok=True)
+
+        if len(all_df):
+            group_df = all_df[all_df["dataset_group"] == group_name].copy()
+        else:
+            group_df = pd.DataFrame(columns=ResultRow.__annotations__.keys())
+
+        group_csv = group_dir / "all_regression_results.csv"
+        group_summary = group_dir / "summary.txt"
+        group_df.to_csv(group_csv, index=False)
+        write_summary(group_summary, group_df, group_files, wall_seconds)
 
 
 def main() -> None:
@@ -220,6 +266,10 @@ def main() -> None:
     args = parser.parse_args()
 
     model_path = Path(args.model_path).expanduser()
+    try:
+        model_path = model_path.resolve()
+    except Exception:
+        pass
     if not model_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {model_path}")
 
@@ -301,9 +351,13 @@ def main() -> None:
 
     wall_seconds = time.time() - start_time
     write_summary(summary_txt, all_df, csv_files, wall_seconds)
+    write_group_outputs(out_dir, all_df, csv_files, wall_seconds)
 
     print(f"saved_all_csv: {all_csv}")
     print(f"saved_summary: {summary_txt}")
+    print("saved_group_summaries:")
+    for group_name in sorted({dataset_group_name(csv_path) for csv_path in csv_files}):
+        print(f"  {group_name}: {out_dir / group_name / 'summary.txt'}")
     print("model_kwargs:")
     print(json.dumps(model_kwargs, indent=2, ensure_ascii=False))
 
