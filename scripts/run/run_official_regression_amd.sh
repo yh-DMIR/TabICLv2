@@ -7,6 +7,10 @@ export TEMP=/tmp/$USER
 export TMP=/tmp/$USER
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
+unset HIP_VISIBLE_DEVICES
+unset CUDA_VISIBLE_DEVICES
+unset ROCR_VISIBLE_DEVICES
+unset GPU_DEVICE_ORDINAL
 
 PYTHON=${PYTHON:-python}
 SCRIPT=${SCRIPT:-benchmark_tabicl_regression_amd.py}

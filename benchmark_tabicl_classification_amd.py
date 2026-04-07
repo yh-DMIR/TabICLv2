@@ -4,10 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import multiprocessing as mp
 import os
 import re
-import subprocess
-import sys
 import time
 import traceback
 from dataclasses import asdict, dataclass
@@ -266,7 +265,10 @@ def evaluate_one_dataset(
 
 def run_worker(
     worker_id: int,
+    gpu_id: int,
     task_items: List[Tuple[str, str, str, str]],
+    ready_queue,
+    start_event,
     worker_out_csv: str,
     model_kwargs: Dict,
     test_size: float,
@@ -274,6 +276,10 @@ def run_worker(
     verbose: bool,
 ) -> None:
     try:
+        gpu_id_str = str(gpu_id)
+        os.environ["ROCR_VISIBLE_DEVICES"] = gpu_id_str
+        os.environ.pop("HIP_VISIBLE_DEVICES", None)
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ.setdefault("OMP_NUM_THREADS", "1")
         os.environ.setdefault("MKL_NUM_THREADS", "1")
 
@@ -287,9 +293,18 @@ def run_worker(
         worker_kwargs = dict(model_kwargs)
         worker_kwargs["device"] = "cuda:0"
         clf = TabICLClassifier(**worker_kwargs)
+        ready_queue.put(
+            {
+                "worker_id": worker_id,
+                "gpu_id": gpu_id,
+                "status": "ready",
+                "assigned_count": len(task_items),
+            }
+        )
+        start_event.wait()
 
         rows: List[ResultRow] = []
-        gpu_label = os.environ.get("HIP_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES", "?"))
+        gpu_label = gpu_id
         for item in task_items:
             benchmark, split_kind, train_path, test_path = item
             row = evaluate_one_dataset(
@@ -313,6 +328,17 @@ def run_worker(
         worker_df = pd.DataFrame([asdict(row) for row in rows]) if rows else pd.DataFrame(columns=columns)
         worker_df.to_csv(worker_out_csv, index=False)
     except Exception:
+        try:
+            ready_queue.put(
+                {
+                    "worker_id": worker_id,
+                    "gpu_id": gpu_id,
+                    "status": "crash",
+                    "error": traceback.format_exc(),
+                }
+            )
+        except Exception:
+            pass
         pd.DataFrame(
             [
                 {
@@ -332,73 +358,6 @@ def run_worker(
                 }
             ]
         ).to_csv(worker_out_csv, index=False)
-
-
-def launch_workers(args, model_kwargs: Dict, gpu_ids: List[int]) -> None:
-    script_path = Path(__file__).resolve()
-    procs: List[subprocess.Popen] = []
-    for worker_id, gpu_id in enumerate(gpu_ids):
-        env = os.environ.copy()
-        gpu_id_str = str(gpu_id)
-        env["HIP_VISIBLE_DEVICES"] = gpu_id_str
-        env["ROCR_VISIBLE_DEVICES"] = gpu_id_str
-        env["CUDA_VISIBLE_DEVICES"] = gpu_id_str
-        env.setdefault("OMP_NUM_THREADS", "1")
-        env.setdefault("MKL_NUM_THREADS", "1")
-
-        cmd = [
-            sys.executable,
-            str(script_path),
-            "--mode",
-            "worker",
-            "--worker-id",
-            str(worker_id),
-            "--workers",
-            str(args.workers),
-            "--root",
-            str(args.root),
-            "--benchmarks",
-            args.benchmarks,
-            "--model-path",
-            str(args.model_path),
-            "--out-dir",
-            str(args.out_dir),
-            "--batch-size",
-            str(args.batch_size),
-            "--n-estimators",
-            str(args.n_estimators),
-            "--norm-methods",
-            args.norm_methods,
-            "--feat-shuffle",
-            args.feat_shuffle,
-            "--kv-cache",
-            args.kv_cache,
-            "--softmax-temp",
-            str(args.softmax_temp),
-            "--random-state",
-            str(args.random_state),
-            "--test-size",
-            str(args.test_size),
-        ]
-        if args.no_amp:
-            cmd.append("--no-amp")
-        if args.no_class_shift:
-            cmd.append("--no-class-shift")
-        if args.no_average_logits:
-            cmd.append("--no-average-logits")
-        if args.small_first:
-            cmd.append("--small-first")
-        if args.verbose:
-            cmd.append("--verbose")
-        procs.append(subprocess.Popen(cmd, env=env))
-
-    failed_codes: List[int] = []
-    for proc in procs:
-        rc = proc.wait()
-        if rc != 0:
-            failed_codes.append(rc)
-    if failed_codes:
-        raise RuntimeError(f"Worker subprocesses failed with exit codes: {failed_codes}")
 
 
 def collect_worker_outputs(out_dir: Path, workers: int) -> List[pd.DataFrame]:
@@ -439,8 +398,6 @@ def write_summary(summary_path: Path, result_df: pd.DataFrame, discovered_datase
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="all", choices=["all", "worker"])
-    parser.add_argument("--worker-id", type=int, default=None)
     parser.add_argument("--root", default=".")
     parser.add_argument("--benchmarks", default=",".join(DEFAULT_BENCHMARKS))
     parser.add_argument("--out-dir", default="result/TabICLv2_official_classification")
@@ -512,23 +469,73 @@ def main() -> None:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-    start_time = time.time()
-    if args.mode == "worker":
-        if args.worker_id is None:
-            raise ValueError("--worker-id is required in worker mode")
-        task_items = shard_items(tasks, args.workers, args.worker_id)
-        run_worker(
-            worker_id=args.worker_id,
-            task_items=task_items,
-            worker_out_csv=str(out_dir / f"worker_{args.worker_id}.csv"),
-            model_kwargs=dict(model_kwargs),
-            test_size=args.test_size,
-            random_state=args.random_state,
-            verbose=args.verbose,
-        )
-        return
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
 
-    launch_workers(args, model_kwargs, gpu_ids)
+    start_time = time.time()
+    ready_queue: mp.Queue = mp.Queue()
+    start_event = mp.Event()
+    processes: List[mp.Process] = []
+    for worker_id in range(args.workers):
+        task_items = shard_items(tasks, args.workers, worker_id)
+        proc = mp.Process(
+            target=run_worker,
+            args=(
+                worker_id,
+                gpu_ids[worker_id],
+                task_items,
+                ready_queue,
+                start_event,
+                str(out_dir / f"worker_{worker_id}.csv"),
+                dict(model_kwargs),
+                args.test_size,
+                args.random_state,
+                args.verbose,
+            ),
+            daemon=False,
+        )
+        proc.start()
+        processes.append(proc)
+
+    ready_workers: set[int] = set()
+    while len(ready_workers) < args.workers:
+        try:
+            message = ready_queue.get(timeout=10)
+        except Exception:
+            dead_workers = [
+                str(idx)
+                for idx, proc in enumerate(processes)
+                if not proc.is_alive() and idx not in ready_workers
+            ]
+            if dead_workers:
+                raise RuntimeError(
+                    "Some workers exited before initialization completed: "
+                    + ", ".join(dead_workers)
+                )
+            continue
+
+        if message.get("status") == "ready":
+            ready_workers.add(int(message["worker_id"]))
+            if args.verbose:
+                print(
+                    f"[worker {message['worker_id']} | gpu {message['gpu_id']}] "
+                    f"ready assigned={message.get('assigned_count', '?')}"
+                )
+            continue
+
+        if message.get("status") == "crash":
+            raise RuntimeError(
+                f"Worker {message['worker_id']} on gpu {message['gpu_id']} crashed "
+                f"during initialization:\n{message.get('error', '(no traceback)')}"
+            )
+
+    start_event.set()
+
+    for proc in processes:
+        proc.join()
+
     dfs = collect_worker_outputs(out_dir, args.workers)
 
     columns = list(ResultRow.__annotations__.keys())
