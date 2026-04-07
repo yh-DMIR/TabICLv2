@@ -10,8 +10,8 @@ export MKL_NUM_THREADS=1
 
 PYTHON=${PYTHON:-python}
 SCRIPT=${SCRIPT:-benchmark_tabicl_classification_amd.py}
-ROOT=${ROOT:-limix}
-BENCHMARKS=${BENCHMARKS:-openml_cc18_csv,tabzilla_csv,talent_csv}
+ROOT=${ROOT:-.}
+BENCHMARKS=${BENCHMARKS:-openml_cc18_csv=../limix/openml_cc18_csv,tabarena_cls=dataset/tabarena/cls,tabzilla_csv=../limix/tabzilla_csv,talent_csv=../limix/talent_csv}
 MODEL_PATH=${MODEL_PATH:-ckpt/TabICLv2/tabicl-classifier-v2-20260212.ckpt}
 OUT_DIR=${OUT_DIR:-result/TabICLv2_official_classification}
 WORKERS=${WORKERS:-8}
@@ -30,4 +30,5 @@ ${PYTHON} ${SCRIPT} \
   --feat-shuffle latin \
   --kv-cache kv \
   --softmax-temp 0.9 \
+  --test-size 0.2 \
   --verbose
