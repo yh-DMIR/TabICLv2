@@ -1,0 +1,9 @@
+discovered_datasets: 38
+processed_datasets: 45
+ok_count: 33
+failed_count: 12
+avg_accuracy_ok: 0.874417
+avg_f1_weighted_ok: 0.863329
+avg_logloss_ok: 0.292168
+wall_seconds: 741.816
+failed_datasets: 46908__APSFailure, 46920__customer_satisfaction_in_airline, 46922__Diabetes130US, 46929__GiveMeSomeCredit, 46955__SDSS17, __WORKER_CRASH__1, __WORKER_CRASH__2, __WORKER_CRASH__3, __WORKER_CRASH__4, __WORKER_CRASH__5, __WORKER_CRASH__6, __WORKER_CRASH__7
