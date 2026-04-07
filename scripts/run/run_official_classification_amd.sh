@@ -5,8 +5,8 @@ mkdir -p /tmp/$USER/comgr
 export TMPDIR=/tmp/$USER
 export TEMP=/tmp/$USER
 export TMP=/tmp/$USER
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
+#export OMP_NUM_THREADS=1
+#export MKL_NUM_THREADS=1
 
 PYTHON=${PYTHON:-python}
 SCRIPT=${SCRIPT:-benchmark_tabicl_classification_amd.py}
