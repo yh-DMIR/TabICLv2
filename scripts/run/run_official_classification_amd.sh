@@ -16,7 +16,7 @@ unset GPU_DEVICE_ORDINAL
 PYTHON=${PYTHON:-python}
 SCRIPT=${SCRIPT:-benchmark_tabicl_classification_amd.py}
 ROOT=${ROOT:-.}
-BENCHMARKS=${BENCHMARKS:-openml_cc18_csv=../limix/openml_cc18_csv,tabarena_cls=dataset/tabarena/cls,tabzilla_csv=../limix/tabzilla_csv,talent_csv=../limix/talent_csv}
+BENCHMARKS=${BENCHMARKS:-tabarena_cls=dataset/tabarena/cls,talent_cls=dataset/talent_cls}
 MODEL_PATH=${MODEL_PATH:-ckpt/TabICLv2/tabicl-classifier-v2-20260212.ckpt}
 OUT_DIR=${OUT_DIR:-result/TabICLv2_official_classification}
 WORKERS=${WORKERS:-8}
