@@ -7,6 +7,7 @@ export TEMP=/tmp/$USER
 export TMP=/tmp/$USER
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 unset HIP_VISIBLE_DEVICES
 unset CUDA_VISIBLE_DEVICES
 unset ROCR_VISIBLE_DEVICES
@@ -32,7 +33,9 @@ ${PYTHON} ${SCRIPT} \
   --n-estimators 32 \
   --norm-methods none,power \
   --feat-shuffle latin \
-  --kv-cache kv \
+  --kv-cache none \
+  --offload-mode auto \
+  --disk-offload-dir "${OUT_DIR}/_disk_offload" \
   --softmax-temp 0.9 \
   --test-size 0.2 \
   --verbose

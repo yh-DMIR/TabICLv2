@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import multiprocessing as mp
 import os
@@ -90,6 +91,19 @@ def collect_torch_diagnostics() -> Dict[str, object]:
         "ROCR_VISIBLE_DEVICES": os.environ.get("ROCR_VISIBLE_DEVICES"),
         "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
     }
+
+
+def cleanup_torch_memory() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+    except Exception:
+        pass
 
 
 def evaluate_one_dataset(regressor, csv_path: Path, test_size: float, random_state: int) -> ResultRow:
@@ -223,6 +237,7 @@ def run_worker(
                         f"[worker {worker_id} | gpu {gpu_label}] "
                         f"[fail] {row.dataset_name} error={row.error}"
                     )
+            cleanup_torch_memory()
 
         columns = list(ResultRow.__annotations__.keys())
         worker_df = pd.DataFrame([asdict(row) for row in rows]) if rows else pd.DataFrame(columns=columns)
@@ -328,6 +343,9 @@ def main() -> None:
     parser.add_argument("--norm-methods", default="none,power")
     parser.add_argument("--feat-shuffle", default="latin")
     parser.add_argument("--kv-cache", default="kv", choices=["none", "kv", "repr"])
+    parser.add_argument("--offload-mode", default="cpu", choices=["auto", "gpu", "cpu", "disk"])
+    parser.add_argument("--disk-offload-dir", default=None)
+    parser.add_argument("--use-fa3", action="store_true")
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--verbose", action="store_true")
@@ -361,11 +379,15 @@ def main() -> None:
         "norm_methods": norm_methods,
         "feat_shuffle_method": args.feat_shuffle,
         "use_amp": True,
+        "use_fa3": args.use_fa3,
+        "offload_mode": args.offload_mode,
         "verbose": False,
         "random_state": args.random_state,
     }
     if args.kv_cache != "none":
         model_kwargs["kv_cache"] = args.kv_cache
+    if args.disk_offload_dir:
+        model_kwargs["disk_offload_dir"] = str(Path(args.disk_offload_dir).expanduser())
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")

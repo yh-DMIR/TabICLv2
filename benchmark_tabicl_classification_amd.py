@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import multiprocessing as mp
 import os
 import re
@@ -43,6 +44,52 @@ class ResultRow:
     predict_seconds: float
     status: str
     error: Optional[str]
+
+
+def clear_torch_cache() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+def is_retryable_error(error: Optional[str]) -> bool:
+    if not error:
+        return False
+    text = error.lower()
+    return (
+        "outofmemory" in text
+        or "out of memory" in text
+        or "hip out of memory" in text
+        or "failed to execute even with minimum batch size" in text
+        or "no kernel image is available for execution on the device" in text
+    )
+
+
+def build_classifier(model_kwargs: Dict):
+    from tabicl import TabICLClassifier
+
+    worker_kwargs = dict(model_kwargs)
+    worker_kwargs["device"] = "cuda:0"
+    return TabICLClassifier(**worker_kwargs)
+
+
+def make_safe_model_kwargs(model_kwargs: Dict, worker_out_csv: str, worker_id: int) -> Dict:
+    safe_kwargs = dict(model_kwargs)
+    safe_kwargs["batch_size"] = 1
+    safe_kwargs["use_fa3"] = False
+    safe_kwargs["offload_mode"] = "disk"
+    safe_kwargs.pop("kv_cache", None)
+    disk_dir = Path(worker_out_csv).parent / "_disk_offload" / f"worker_{worker_id}"
+    disk_dir.mkdir(parents=True, exist_ok=True)
+    safe_kwargs["disk_offload_dir"] = str(disk_dir)
+    return safe_kwargs
 
 
 def sanitize_dataset_id(path: Path) -> str:
@@ -288,11 +335,8 @@ def run_worker(
         if not torch.cuda.is_available():
             raise RuntimeError("GPU backend is not available in this worker.")
 
-        from tabicl import TabICLClassifier
-
-        worker_kwargs = dict(model_kwargs)
-        worker_kwargs["device"] = "cuda:0"
-        clf = TabICLClassifier(**worker_kwargs)
+        active_model_kwargs = dict(model_kwargs)
+        clf = build_classifier(active_model_kwargs)
         ready_queue.put(
             {
                 "worker_id": worker_id,
@@ -316,6 +360,25 @@ def run_worker(
                 test_size=test_size,
                 random_state=random_state,
             )
+
+            if row.status == "fail" and is_retryable_error(row.error):
+                clear_torch_cache()
+                active_model_kwargs = make_safe_model_kwargs(active_model_kwargs, worker_out_csv, worker_id)
+                clf = build_classifier(active_model_kwargs)
+                retry_row = evaluate_one_dataset(
+                    clf,
+                    benchmark=benchmark,
+                    split_kind=split_kind,
+                    train_path=Path(train_path),
+                    test_path=Path(test_path) if test_path else None,
+                    test_size=test_size,
+                    random_state=random_state,
+                )
+                if retry_row.status == "ok":
+                    row = retry_row
+                else:
+                    row.error = f"initial={row.error} || retry={retry_row.error}"
+
             rows.append(row)
 
             if verbose:
@@ -323,6 +386,7 @@ def run_worker(
                     print(f"[worker {worker_id} | gpu {gpu_label}] [ok] {benchmark}/{row.dataset_id} acc={row.accuracy:.6f}")
                 else:
                     print(f"[worker {worker_id} | gpu {gpu_label}] [fail] {benchmark}/{row.dataset_id} error={row.error}")
+            clear_torch_cache()
 
         columns = list(ResultRow.__annotations__.keys())
         worker_df = pd.DataFrame([asdict(row) for row in rows]) if rows else pd.DataFrame(columns=columns)
@@ -408,10 +472,13 @@ def main() -> None:
     parser.add_argument("--n-estimators", type=int, default=32)
     parser.add_argument("--norm-methods", default="none,power")
     parser.add_argument("--feat-shuffle", default="latin")
-    parser.add_argument("--kv-cache", default="kv", choices=["none", "kv", "repr"])
+    parser.add_argument("--kv-cache", default="none", choices=["none", "kv", "repr"])
     parser.add_argument("--softmax-temp", type=float, default=0.9)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--test-size", type=float, default=0.2)
+    parser.add_argument("--offload-mode", default="auto", choices=["auto", "gpu", "cpu", "disk"])
+    parser.add_argument("--disk-offload-dir", default=None)
+    parser.add_argument("--use-fa3", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-class-shift", action="store_true")
     parser.add_argument("--no-average-logits", action="store_true")
@@ -449,6 +516,7 @@ def main() -> None:
         raise ValueError(f"--gpus must contain exactly {args.workers} ids")
 
     norm_methods = [x.strip() for x in args.norm_methods.split(",") if x.strip()]
+    disk_offload_dir = args.disk_offload_dir or str(out_dir / "_disk_offload")
     model_kwargs: Dict = {
         "model_path": str(model_path),
         "allow_auto_download": False,
@@ -460,6 +528,9 @@ def main() -> None:
         "softmax_temperature": args.softmax_temp,
         "average_logits": not args.no_average_logits,
         "use_amp": not args.no_amp,
+        "use_fa3": args.use_fa3,
+        "offload_mode": args.offload_mode,
+        "disk_offload_dir": disk_offload_dir,
         "verbose": False,
         "random_state": args.random_state,
     }
