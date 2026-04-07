@@ -5,5 +5,5 @@ failed_count: 0
 avg_accuracy_ok: (none)
 avg_f1_weighted_ok: (none)
 avg_logloss_ok: (none)
-wall_seconds: 741.816
+wall_seconds: 217.407
 failed_datasets: (none)

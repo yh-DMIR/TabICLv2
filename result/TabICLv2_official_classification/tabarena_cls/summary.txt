@@ -1,9 +1,9 @@
 discovered_datasets: 38
 processed_datasets: 38
-ok_count: 33
-failed_count: 5
-avg_accuracy_ok: 0.874417
-avg_f1_weighted_ok: 0.863329
-avg_logloss_ok: 0.292168
-wall_seconds: 741.816
-failed_datasets: 46908__APSFailure, 46920__customer_satisfaction_in_airline, 46922__Diabetes130US, 46929__GiveMeSomeCredit, 46955__SDSS17
+ok_count: 28
+failed_count: 10
+avg_accuracy_ok: 0.876634
+avg_f1_weighted_ok: 0.867377
+avg_logloss_ok: 0.280849
+wall_seconds: 217.407
+failed_datasets: 46908__APSFailure, 46916__coil2000_insurance_policies, 46918__credit-g, 46920__customer_satisfaction_in_airline, 46921__diabetes, 46922__Diabetes130US, 46929__GiveMeSomeCredit, 46933__hiva_agnostic, 46955__SDSS17, 46980__MIC
