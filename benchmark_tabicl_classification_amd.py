@@ -262,7 +262,7 @@ def evaluate_one_dataset(
 def worker_main(
     worker_id: int,
     gpu_id: int,
-    task_queue,
+    task_items: List[Tuple[str, str, str, str]],
     worker_out_csv: str,
     model_kwargs: Dict,
     test_size: float,
@@ -289,11 +289,7 @@ def worker_main(
         clf = TabICLClassifier(**worker_kwargs)
 
         rows: List[ResultRow] = []
-        while True:
-            item = task_queue.get()
-            if item is None:
-                break
-
+        for item in task_items:
             benchmark, split_kind, train_path, test_path = item
             row = evaluate_one_dataset(
                 clf,
@@ -440,11 +436,9 @@ def main() -> None:
         pass
 
     start_time = time.time()
-    task_queue: mp.Queue = mp.Queue()
-    for task in tasks:
-        task_queue.put(task)
-    for _ in range(args.workers):
-        task_queue.put(None)
+    per_worker_tasks: List[List[Tuple[str, str, str, str]]] = [[] for _ in range(args.workers)]
+    for idx, task in enumerate(tasks):
+        per_worker_tasks[idx % args.workers].append(task)
 
     worker_csv_paths: List[Path] = []
     processes: List[mp.Process] = []
@@ -456,7 +450,7 @@ def main() -> None:
             args=(
                 worker_id,
                 gpu_ids[worker_id],
-                task_queue,
+                per_worker_tasks[worker_id],
                 str(worker_csv),
                 dict(model_kwargs),
                 args.test_size,

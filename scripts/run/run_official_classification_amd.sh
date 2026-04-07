@@ -24,7 +24,7 @@ ${PYTHON} ${SCRIPT} \
   --out-dir "${OUT_DIR}" \
   --workers "${WORKERS}" \
   --gpus "${GPUS}" \
-  --batch-size 4 \
+  --batch-size 2 \
   --n-estimators 32 \
   --norm-methods none,power \
   --feat-shuffle latin \
