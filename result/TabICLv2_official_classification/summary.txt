@@ -1,9 +1,9 @@
-discovered_datasets: 38
-processed_datasets: 38
-ok_count: 28
-failed_count: 10
-avg_accuracy_ok: 0.876634
-avg_f1_weighted_ok: 0.867377
-avg_logloss_ok: 0.280849
-wall_seconds: 217.407
-failed_datasets: 46908__APSFailure, 46916__coil2000_insurance_policies, 46918__credit-g, 46920__customer_satisfaction_in_airline, 46921__diabetes, 46922__Diabetes130US, 46929__GiveMeSomeCredit, 46933__hiva_agnostic, 46955__SDSS17, 46980__MIC
+discovered_datasets: 238
+processed_datasets: 238
+ok_count: 208
+failed_count: 30
+avg_accuracy_ok: 0.856597
+avg_f1_weighted_ok: 0.847605
+avg_logloss_ok: 0.338486
+wall_seconds: 578.741
+failed_datasets: 46911__Bank_Customer_Churn.csv, 46921__diabetes.csv, 46935__HR_Analytics_Job_Change_of_Data_Scientists.csv, 46952__qsar-biodeg.csv, 46979__jm1.csv, Bank_Customer_Churn_Dataset.csv, Contaminant-detection-in-packaged-cocoa-hazelnut-spread-jars-using-Microwaves-Sensing-and-Machine-Learning-9.0GHz_Urbinati.csv, FOREX_audcad-day-High.csv, FOREX_cadjpy-hour-High.csv, Heart-Disease-Dataset-_Comprehensive.csv, KDDCup09_upselling.csv, PhishingWebsites.csv, Shipping.csv, accelerometer.csv, analcatdata_authorship.csv, churn.csv, customer_satisfaction_in_airline.csv, eeg-eye-state.csv, golf_play_dataset_extended.csv, internet_firewall.csv, kr-vs-kp.csv, maternal_health_risk.csv, microaggregation2.csv, one-hundred-plants-texture.csv, pc4.csv, rl.csv, spambase.csv, telco-customer-churn.csv, walking-activity.csv, wine.csv
