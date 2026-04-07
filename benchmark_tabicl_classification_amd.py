@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import multiprocessing as mp
 import os
 import re
+import subprocess
+import sys
 import time
 import traceback
 from dataclasses import asdict, dataclass
@@ -158,6 +159,10 @@ def build_tasks(root: Path, benchmark_specs: List[str], largest_first: bool) -> 
     return merged, discovered
 
 
+def shard_items(items: List[Tuple[str, str, str, str]], num_workers: int, worker_id: int) -> List[Tuple[str, str, str, str]]:
+    return items[worker_id::num_workers]
+
+
 def split_single_dataset(df: pd.DataFrame, random_state: int, test_size: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     target_col = infer_target_column_single(df)
     df = df.dropna(subset=[target_col])
@@ -259,9 +264,8 @@ def evaluate_one_dataset(
         )
 
 
-def worker_main(
+def run_worker(
     worker_id: int,
-    gpu_id: int,
     task_items: List[Tuple[str, str, str, str]],
     worker_out_csv: str,
     model_kwargs: Dict,
@@ -270,10 +274,6 @@ def worker_main(
     verbose: bool,
 ) -> None:
     try:
-        gpu_id_str = str(gpu_id)
-        os.environ["HIP_VISIBLE_DEVICES"] = gpu_id_str
-        os.environ["ROCR_VISIBLE_DEVICES"] = gpu_id_str
-        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id_str
         os.environ.setdefault("OMP_NUM_THREADS", "1")
         os.environ.setdefault("MKL_NUM_THREADS", "1")
 
@@ -289,6 +289,7 @@ def worker_main(
         clf = TabICLClassifier(**worker_kwargs)
 
         rows: List[ResultRow] = []
+        gpu_label = os.environ.get("HIP_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES", "?"))
         for item in task_items:
             benchmark, split_kind, train_path, test_path = item
             row = evaluate_one_dataset(
@@ -304,9 +305,9 @@ def worker_main(
 
             if verbose:
                 if row.status == "ok":
-                    print(f"[worker {worker_id} | gpu {gpu_id}] [ok] {benchmark}/{row.dataset_id} acc={row.accuracy:.6f}")
+                    print(f"[worker {worker_id} | gpu {gpu_label}] [ok] {benchmark}/{row.dataset_id} acc={row.accuracy:.6f}")
                 else:
-                    print(f"[worker {worker_id} | gpu {gpu_id}] [fail] {benchmark}/{row.dataset_id} error={row.error}")
+                    print(f"[worker {worker_id} | gpu {gpu_label}] [fail] {benchmark}/{row.dataset_id} error={row.error}")
 
         columns = list(ResultRow.__annotations__.keys())
         worker_df = pd.DataFrame([asdict(row) for row in rows]) if rows else pd.DataFrame(columns=columns)
@@ -331,6 +332,85 @@ def worker_main(
                 }
             ]
         ).to_csv(worker_out_csv, index=False)
+
+
+def launch_workers(args, model_kwargs: Dict, gpu_ids: List[int]) -> None:
+    script_path = Path(__file__).resolve()
+    procs: List[subprocess.Popen] = []
+    for worker_id, gpu_id in enumerate(gpu_ids):
+        env = os.environ.copy()
+        gpu_id_str = str(gpu_id)
+        env["HIP_VISIBLE_DEVICES"] = gpu_id_str
+        env["ROCR_VISIBLE_DEVICES"] = gpu_id_str
+        env["CUDA_VISIBLE_DEVICES"] = gpu_id_str
+        env.setdefault("OMP_NUM_THREADS", "1")
+        env.setdefault("MKL_NUM_THREADS", "1")
+
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--mode",
+            "worker",
+            "--worker-id",
+            str(worker_id),
+            "--workers",
+            str(args.workers),
+            "--root",
+            str(args.root),
+            "--benchmarks",
+            args.benchmarks,
+            "--model-path",
+            str(args.model_path),
+            "--out-dir",
+            str(args.out_dir),
+            "--batch-size",
+            str(args.batch_size),
+            "--n-estimators",
+            str(args.n_estimators),
+            "--norm-methods",
+            args.norm_methods,
+            "--feat-shuffle",
+            args.feat_shuffle,
+            "--kv-cache",
+            args.kv_cache,
+            "--softmax-temp",
+            str(args.softmax_temp),
+            "--random-state",
+            str(args.random_state),
+            "--test-size",
+            str(args.test_size),
+        ]
+        if args.no_amp:
+            cmd.append("--no-amp")
+        if args.no_class_shift:
+            cmd.append("--no-class-shift")
+        if args.no_average_logits:
+            cmd.append("--no-average-logits")
+        if args.small_first:
+            cmd.append("--small-first")
+        if args.verbose:
+            cmd.append("--verbose")
+        procs.append(subprocess.Popen(cmd, env=env))
+
+    failed_codes: List[int] = []
+    for proc in procs:
+        rc = proc.wait()
+        if rc != 0:
+            failed_codes.append(rc)
+    if failed_codes:
+        raise RuntimeError(f"Worker subprocesses failed with exit codes: {failed_codes}")
+
+
+def collect_worker_outputs(out_dir: Path, workers: int) -> List[pd.DataFrame]:
+    dfs: List[pd.DataFrame] = []
+    for worker_id in range(workers):
+        worker_csv = out_dir / f"worker_{worker_id}.csv"
+        if worker_csv.exists():
+            try:
+                dfs.append(pd.read_csv(worker_csv))
+            except pd.errors.EmptyDataError:
+                continue
+    return dfs
 
 
 def write_summary(summary_path: Path, result_df: pd.DataFrame, discovered_datasets: int, wall_seconds: float) -> None:
@@ -359,6 +439,8 @@ def write_summary(summary_path: Path, result_df: pd.DataFrame, discovered_datase
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", default="all", choices=["all", "worker"])
+    parser.add_argument("--worker-id", type=int, default=None)
     parser.add_argument("--root", default=".")
     parser.add_argument("--benchmarks", default=",".join(DEFAULT_BENCHMARKS))
     parser.add_argument("--out-dir", default="result/TabICLv2_official_classification")
@@ -430,48 +512,24 @@ def main() -> None:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-    try:
-        mp.set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass
-
     start_time = time.time()
-    per_worker_tasks: List[List[Tuple[str, str, str, str]]] = [[] for _ in range(args.workers)]
-    for idx, task in enumerate(tasks):
-        per_worker_tasks[idx % args.workers].append(task)
-
-    worker_csv_paths: List[Path] = []
-    processes: List[mp.Process] = []
-    for worker_id in range(args.workers):
-        worker_csv = out_dir / f"worker_{worker_id}.csv"
-        worker_csv_paths.append(worker_csv)
-        process = mp.Process(
-            target=worker_main,
-            args=(
-                worker_id,
-                gpu_ids[worker_id],
-                per_worker_tasks[worker_id],
-                str(worker_csv),
-                dict(model_kwargs),
-                args.test_size,
-                args.random_state,
-                args.verbose,
-            ),
-            daemon=False,
+    if args.mode == "worker":
+        if args.worker_id is None:
+            raise ValueError("--worker-id is required in worker mode")
+        task_items = shard_items(tasks, args.workers, args.worker_id)
+        run_worker(
+            worker_id=args.worker_id,
+            task_items=task_items,
+            worker_out_csv=str(out_dir / f"worker_{args.worker_id}.csv"),
+            model_kwargs=dict(model_kwargs),
+            test_size=args.test_size,
+            random_state=args.random_state,
+            verbose=args.verbose,
         )
-        process.start()
-        processes.append(process)
+        return
 
-    for process in processes:
-        process.join()
-
-    dfs: List[pd.DataFrame] = []
-    for worker_csv in worker_csv_paths:
-        if worker_csv.exists():
-            try:
-                dfs.append(pd.read_csv(worker_csv))
-            except pd.errors.EmptyDataError:
-                continue
+    launch_workers(args, model_kwargs, gpu_ids)
+    dfs = collect_worker_outputs(out_dir, args.workers)
 
     columns = list(ResultRow.__annotations__.keys())
     all_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=columns)

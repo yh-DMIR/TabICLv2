@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import multiprocessing as mp
 import os
+import subprocess
+import sys
 import time
 import traceback
 from dataclasses import asdict, dataclass
@@ -158,10 +159,13 @@ def evaluate_one_dataset(regressor, csv_path: Path, test_size: float, random_sta
         )
 
 
-def worker_main(
+def shard_items(items: List[Path], num_workers: int, worker_id: int) -> List[Path]:
+    return items[worker_id::num_workers]
+
+
+def run_worker(
     worker_id: int,
-    gpu_id: int,
-    task_queue,
+    task_items: List[Path],
     worker_out_csv: str,
     model_kwargs: Dict,
     test_size: float,
@@ -169,10 +173,6 @@ def worker_main(
     verbose: bool,
 ) -> None:
     try:
-        gpu_id_str = str(gpu_id)
-        os.environ["HIP_VISIBLE_DEVICES"] = gpu_id_str
-        os.environ["ROCR_VISIBLE_DEVICES"] = gpu_id_str
-        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id_str
         os.environ.setdefault("OMP_NUM_THREADS", "1")
         os.environ.setdefault("MKL_NUM_THREADS", "1")
 
@@ -192,28 +192,26 @@ def worker_main(
         regressor = TabICLRegressor(**worker_kwargs)
 
         rows: List[ResultRow] = []
-        while True:
-            item = task_queue.get()
-            if item is None:
-                break
-
-            csv_path = Path(item)
+        gpu_label = os.environ.get("HIP_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES", "?"))
+        for csv_path in task_items:
             row = evaluate_one_dataset(regressor, csv_path, test_size=test_size, random_state=random_state)
             rows.append(row)
 
             if verbose:
                 if row.status == "ok":
                     print(
-                        f"[worker {worker_id} | gpu {gpu_id}] "
+                        f"[worker {worker_id} | gpu {gpu_label}] "
                         f"[ok] {row.dataset_name} r2={row.r2:.6f} rmse={row.rmse:.6f}"
                     )
                 else:
                     print(
-                        f"[worker {worker_id} | gpu {gpu_id}] "
+                        f"[worker {worker_id} | gpu {gpu_label}] "
                         f"[fail] {row.dataset_name} error={row.error}"
                     )
 
-        pd.DataFrame([asdict(row) for row in rows]).to_csv(worker_out_csv, index=False)
+        columns = list(ResultRow.__annotations__.keys())
+        worker_df = pd.DataFrame([asdict(row) for row in rows]) if rows else pd.DataFrame(columns=columns)
+        worker_df.to_csv(worker_out_csv, index=False)
     except Exception:
         crash_row = pd.DataFrame(
             [
@@ -235,6 +233,71 @@ def worker_main(
             ]
         )
         crash_row.to_csv(worker_out_csv, index=False)
+
+
+def launch_workers(args, model_kwargs: Dict, gpu_ids: List[int]) -> None:
+    script_path = Path(__file__).resolve()
+    procs: List[subprocess.Popen] = []
+    for worker_id, gpu_id in enumerate(gpu_ids):
+        env = os.environ.copy()
+        gpu_id_str = str(gpu_id)
+        env["HIP_VISIBLE_DEVICES"] = gpu_id_str
+        env["ROCR_VISIBLE_DEVICES"] = gpu_id_str
+        env["CUDA_VISIBLE_DEVICES"] = gpu_id_str
+        env.setdefault("OMP_NUM_THREADS", "1")
+        env.setdefault("MKL_NUM_THREADS", "1")
+
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--mode",
+            "worker",
+            "--worker-id",
+            str(worker_id),
+            "--workers",
+            str(args.workers),
+            "--model-path",
+            str(args.model_path),
+            "--out-dir",
+            str(args.out_dir),
+            "--batch-size",
+            str(args.batch_size),
+            "--n-estimators",
+            str(args.n_estimators),
+            "--norm-methods",
+            args.norm_methods,
+            "--feat-shuffle",
+            args.feat_shuffle,
+            "--kv-cache",
+            args.kv_cache,
+            "--test-size",
+            str(args.test_size),
+            "--random-state",
+            str(args.random_state),
+        ]
+        if args.verbose:
+            cmd.append("--verbose")
+        procs.append(subprocess.Popen(cmd, env=env))
+
+    failed_codes: List[int] = []
+    for proc in procs:
+        rc = proc.wait()
+        if rc != 0:
+            failed_codes.append(rc)
+    if failed_codes:
+        raise RuntimeError(f"Worker subprocesses failed with exit codes: {failed_codes}")
+
+
+def collect_worker_outputs(out_dir: Path, workers: int) -> List[pd.DataFrame]:
+    dfs: List[pd.DataFrame] = []
+    for worker_id in range(workers):
+        worker_csv = out_dir / f"worker_{worker_id}.csv"
+        if worker_csv.exists():
+            try:
+                dfs.append(pd.read_csv(worker_csv))
+            except pd.errors.EmptyDataError:
+                continue
+    return dfs
 
 
 def write_summary(summary_path: Path, result_df: pd.DataFrame, csv_files: List[Path], wall_seconds: float) -> None:
@@ -283,6 +346,8 @@ def write_group_outputs(out_dir: Path, all_df: pd.DataFrame, csv_files: List[Pat
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run TabICLv2 official regressor checkpoint on 3 regression dataset folders with AMD/ROCm multi-GPU.")
+    parser.add_argument("--mode", default="all", choices=["all", "worker"])
+    parser.add_argument("--worker-id", type=int, default=None)
     parser.add_argument("--model-path", default="ckpt/TabICLv2/tabicl-regressor-v2-20260212.ckpt")
     parser.add_argument("--out-dir", default="result/TabICLv2_official_regression")
     parser.add_argument("--workers", type=int, default=8)
@@ -334,47 +399,24 @@ def main() -> None:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-    try:
-        mp.set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass
-
     start_time = time.time()
-    task_queue: mp.Queue = mp.Queue()
-    for csv_path in csv_files:
-        task_queue.put(str(csv_path))
-    for _ in range(args.workers):
-        task_queue.put(None)
-
-    worker_csv_paths: List[Path] = []
-    processes: List[mp.Process] = []
-    for worker_id in range(args.workers):
-        worker_csv = out_dir / f"worker_{worker_id}.csv"
-        worker_csv_paths.append(worker_csv)
-        proc = mp.Process(
-            target=worker_main,
-            args=(
-                worker_id,
-                gpu_ids[worker_id],
-                task_queue,
-                str(worker_csv),
-                dict(model_kwargs),
-                args.test_size,
-                args.random_state,
-                args.verbose,
-            ),
-            daemon=False,
+    if args.mode == "worker":
+        if args.worker_id is None:
+            raise ValueError("--worker-id is required in worker mode")
+        task_items = shard_items(csv_files, args.workers, args.worker_id)
+        run_worker(
+            worker_id=args.worker_id,
+            task_items=task_items,
+            worker_out_csv=str(out_dir / f"worker_{args.worker_id}.csv"),
+            model_kwargs=dict(model_kwargs),
+            test_size=args.test_size,
+            random_state=args.random_state,
+            verbose=args.verbose,
         )
-        proc.start()
-        processes.append(proc)
+        return
 
-    for proc in processes:
-        proc.join()
-
-    dfs: List[pd.DataFrame] = []
-    for worker_csv in worker_csv_paths:
-        if worker_csv.exists():
-            dfs.append(pd.read_csv(worker_csv))
+    launch_workers(args, model_kwargs, gpu_ids)
+    dfs = collect_worker_outputs(out_dir, args.workers)
 
     all_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=ResultRow.__annotations__.keys())
     all_csv = out_dir / "all_regression_results.csv"
