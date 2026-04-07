@@ -7,6 +7,7 @@ export TEMP=/tmp/$USER
 export TMP=/tmp/$USER
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 unset HIP_VISIBLE_DEVICES
 unset CUDA_VISIBLE_DEVICES
 unset ROCR_VISIBLE_DEVICES

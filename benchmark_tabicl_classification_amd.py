@@ -33,6 +33,8 @@ TARGET_CANDIDATES = ["target", "label", "class", "y", "TARGET", "Label", "Class"
 class ResultRow:
     benchmark: str
     dataset_id: str
+    dataset_dir: str
+    dataset_name: str
     n_train: int
     n_test: int
     n_features: int
@@ -59,73 +61,16 @@ def clear_torch_cache() -> None:
         pass
 
 
-def is_retryable_error(error: Optional[str]) -> bool:
-    if not error:
-        return False
-    text = error.lower()
-    return (
-        "outofmemory" in text
-        or "out of memory" in text
-        or "hip out of memory" in text
-        or "failed to execute even with minimum batch size" in text
-        or "no kernel image is available for execution on the device" in text
-    )
+def sanitize_dataset_id(csv_path: Path) -> str:
+    match = re.search(r"(OpenML-ID-\d+)", str(csv_path))
+    return match.group(1) if match else csv_path.stem
 
 
-def build_classifier(model_kwargs: Dict):
-    from tabicl import TabICLClassifier
-
-    worker_kwargs = dict(model_kwargs)
-    worker_kwargs["device"] = "cuda:0"
-    return TabICLClassifier(**worker_kwargs)
-
-
-def make_safe_model_kwargs(model_kwargs: Dict, worker_out_csv: str, worker_id: int) -> Dict:
-    safe_kwargs = dict(model_kwargs)
-    safe_kwargs["batch_size"] = 1
-    safe_kwargs["use_fa3"] = False
-    safe_kwargs["offload_mode"] = "disk"
-    safe_kwargs.pop("kv_cache", None)
-    disk_dir = Path(worker_out_csv).parent / "_disk_offload" / f"worker_{worker_id}"
-    disk_dir.mkdir(parents=True, exist_ok=True)
-    safe_kwargs["disk_offload_dir"] = str(disk_dir)
-    return safe_kwargs
-
-
-def sanitize_dataset_id(path: Path) -> str:
-    match = re.search(r"(OpenML-ID-\d+)", str(path))
-    if match:
-        return match.group(1)
-    stem = path.stem
-    if stem.endswith("_train"):
-        return stem[:-6]
-    if stem.endswith("_test"):
-        return stem[:-5]
-    return stem
-
-
-def infer_target_column(train_df: pd.DataFrame, test_df: pd.DataFrame) -> str:
-    for col in TARGET_CANDIDATES:
-        if col in train_df.columns:
-            return col
-    extra = [col for col in train_df.columns if col not in test_df.columns]
-    if len(extra) == 1:
-        return extra[0]
-    return train_df.columns[-1]
-
-
-def infer_target_column_single(df: pd.DataFrame) -> str:
+def infer_target_column(df: pd.DataFrame) -> str:
     for col in TARGET_CANDIDATES:
         if col in df.columns:
             return col
     return df.columns[-1]
-
-
-def file_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
 
 
 def parse_benchmark_specs(root: Path, specs: List[str]) -> List[Tuple[str, Path]]:
@@ -136,129 +81,75 @@ def parse_benchmark_specs(root: Path, specs: List[str]) -> List[Tuple[str, Path]
             benchmark_name = name.strip()
             benchmark_path = Path(rel_path.strip())
         else:
-            benchmark_path = root / spec.strip()
+            benchmark_path = Path(spec.strip())
             benchmark_name = benchmark_path.name
 
         if not benchmark_path.is_absolute():
             benchmark_path = (root / benchmark_path).resolve()
         else:
             benchmark_path = benchmark_path.resolve()
-
         parsed.append((benchmark_name, benchmark_path))
     return parsed
 
 
-def discover_benchmark_tasks(benchmark_dir: Path, benchmark_name: str, largest_first: bool) -> List[Tuple[str, str, str, str, int]]:
-    paired_tasks: List[Tuple[str, str, str, str, int]] = []
-    paired_train_paths: set[Path] = set()
-    paired_test_paths: set[Path] = set()
-
-    for train_csv in benchmark_dir.rglob("*_train.csv"):
-        test_csv = train_csv.with_name(train_csv.name.replace("_train.csv", "_test.csv"))
-        if not test_csv.exists():
-            continue
-        paired_train_paths.add(train_csv.resolve())
-        paired_test_paths.add(test_csv.resolve())
-        size_bytes = file_size(train_csv) + file_size(test_csv)
-        paired_tasks.append((benchmark_name, "paired", str(train_csv), str(test_csv), size_bytes))
-
-    single_tasks: List[Tuple[str, str, str, str, int]] = []
+def discover_csv_files(benchmark_dir: Path) -> List[Path]:
+    csv_files: List[Path] = []
     for csv_path in benchmark_dir.rglob("*.csv"):
-        resolved = csv_path.resolve()
-        if resolved in paired_train_paths or resolved in paired_test_paths:
+        name = csv_path.name
+        if name.endswith("_train.csv") or name.endswith("_test.csv"):
             continue
-        if csv_path.name.endswith("_train.csv") or csv_path.name.endswith("_test.csv"):
-            continue
-        size_bytes = file_size(csv_path)
-        single_tasks.append((benchmark_name, "split", str(csv_path), "", size_bytes))
-
-    tasks = paired_tasks + single_tasks
-    if largest_first:
-        tasks.sort(key=lambda x: (-x[4], x[0], x[2]))
-    else:
-        tasks.sort(key=lambda x: x[2])
-    return tasks
+        csv_files.append(csv_path)
+    return sorted(csv_files, key=lambda p: p.name)
 
 
-def build_tasks(root: Path, benchmark_specs: List[str], largest_first: bool) -> Tuple[List[Tuple[str, str, str, str]], Dict[str, int]]:
-    per_benchmark: Dict[str, List[Tuple[str, str, str, str, int]]] = {}
+def build_tasks(root: Path, benchmark_specs: List[str]) -> Tuple[List[Tuple[str, str]], Dict[str, int]]:
+    tasks: List[Tuple[str, str]] = []
     discovered: Dict[str, int] = {}
-
     for benchmark_name, benchmark_dir in parse_benchmark_specs(root, benchmark_specs):
-        tasks = discover_benchmark_tasks(benchmark_dir, benchmark_name, largest_first) if benchmark_dir.exists() else []
-        per_benchmark[benchmark_name] = tasks
-        discovered[benchmark_name] = len(tasks)
-
-    merged: List[Tuple[str, str, str, str]] = []
-    benchmark_names = [name for name, _ in parse_benchmark_specs(root, benchmark_specs)]
-    while True:
-        batch: List[Tuple[str, str, str, str, int]] = []
-        for benchmark_name in benchmark_names:
-            if per_benchmark[benchmark_name]:
-                batch.append(per_benchmark[benchmark_name].pop(0))
-        if not batch:
-            break
-        if largest_first:
-            batch.sort(key=lambda x: (-x[4], x[0], x[2]))
-        for benchmark_name, split_kind, train_path, test_path, _ in batch:
-            merged.append((benchmark_name, split_kind, train_path, test_path))
-    return merged, discovered
+        csv_files = discover_csv_files(benchmark_dir) if benchmark_dir.exists() else []
+        discovered[benchmark_name] = len(csv_files)
+        tasks.extend((benchmark_name, str(csv_path)) for csv_path in csv_files)
+    return tasks, discovered
 
 
-def shard_items(items: List[Tuple[str, str, str, str]], num_workers: int, worker_id: int) -> List[Tuple[str, str, str, str]]:
+def shard_items(items: List[Tuple[str, str]], num_workers: int, worker_id: int) -> List[Tuple[str, str]]:
     return items[worker_id::num_workers]
-
-
-def split_single_dataset(df: pd.DataFrame, random_state: int, test_size: float) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    target_col = infer_target_column_single(df)
-    df = df.dropna(subset=[target_col])
-    X = df.drop(columns=[target_col])
-    y = df[target_col]
-
-    if len(X) < 2:
-        raise ValueError("Not enough valid rows after dropping missing target.")
-
-    try:
-        return train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=y)
-    except ValueError:
-        return train_test_split(X, y, test_size=test_size, random_state=random_state)
-
-
-def load_train_test(train_path: Path, test_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, Optional[pd.Series]]:
-    train_df = pd.read_csv(train_path)
-    test_df = pd.read_csv(test_path)
-    target_col = infer_target_column(train_df, test_df)
-
-    train_df = train_df.dropna(subset=[target_col])
-    X_train = train_df.drop(columns=[target_col])
-    y_train = train_df[target_col]
-
-    if target_col in test_df.columns:
-        test_df = test_df.dropna(subset=[target_col])
-        X_test = test_df.drop(columns=[target_col])
-        y_test = test_df[target_col]
-    else:
-        X_test = test_df
-        y_test = None
-    return X_train, X_test, y_train, y_test
 
 
 def evaluate_one_dataset(
     clf,
     benchmark: str,
-    split_kind: str,
-    train_path: Path,
-    test_path: Optional[Path],
+    csv_path: Path,
     test_size: float,
     random_state: int,
 ) -> ResultRow:
-    dataset_id = sanitize_dataset_id(train_path)
+    dataset_id = sanitize_dataset_id(csv_path)
     try:
-        if split_kind == "paired":
-            X_train, X_test, y_train, y_test = load_train_test(train_path, test_path if test_path is not None else train_path)
-        else:
-            df = pd.read_csv(train_path)
-            X_train, X_test, y_train, y_test = split_single_dataset(df, random_state=random_state, test_size=test_size)
+        df = pd.read_csv(csv_path)
+        target_col = infer_target_column(df)
+        df = df.dropna(subset=[target_col])
+
+        X = df.drop(columns=[target_col])
+        y = df[target_col]
+
+        if len(X) < 2:
+            raise ValueError("Not enough valid rows after dropping missing target.")
+
+        try:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X,
+                y,
+                test_size=test_size,
+                random_state=random_state,
+                stratify=y,
+            )
+        except ValueError:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X,
+                y,
+                test_size=test_size,
+                random_state=random_state,
+            )
 
         t0 = time.time()
         clf.fit(X_train, y_train)
@@ -274,18 +165,17 @@ def evaluate_one_dataset(
             ll = None
         predict_seconds = time.time() - t1
 
-        accuracy = accuracy_score(y_test, y_pred)
-        f1_weighted = f1_score(y_test, y_pred, average="weighted")
-
         return ResultRow(
             benchmark=benchmark,
             dataset_id=dataset_id,
+            dataset_dir=csv_path.parent.as_posix(),
+            dataset_name=csv_path.name,
             n_train=int(len(X_train)),
             n_test=int(len(X_test)),
             n_features=int(X_train.shape[1]),
             n_classes=int(y_train.nunique()),
-            accuracy=float(accuracy),
-            f1_weighted=float(f1_weighted),
+            accuracy=float(accuracy_score(y_test, y_pred)),
+            f1_weighted=float(f1_score(y_test, y_pred, average="weighted")),
             logloss=float(ll) if ll is not None else None,
             fit_seconds=float(fit_seconds),
             predict_seconds=float(predict_seconds),
@@ -296,6 +186,8 @@ def evaluate_one_dataset(
         return ResultRow(
             benchmark=benchmark,
             dataset_id=dataset_id,
+            dataset_dir=csv_path.parent.as_posix(),
+            dataset_name=csv_path.name,
             n_train=0,
             n_test=0,
             n_features=0,
@@ -313,7 +205,7 @@ def evaluate_one_dataset(
 def run_worker(
     worker_id: int,
     gpu_id: int,
-    task_items: List[Tuple[str, str, str, str]],
+    task_items: List[Tuple[str, str]],
     ready_queue,
     start_event,
     worker_out_csv: str,
@@ -331,12 +223,15 @@ def run_worker(
         os.environ.setdefault("MKL_NUM_THREADS", "1")
 
         import torch
+        from tabicl import TabICLClassifier
 
         if not torch.cuda.is_available():
             raise RuntimeError("GPU backend is not available in this worker.")
 
-        active_model_kwargs = dict(model_kwargs)
-        clf = build_classifier(active_model_kwargs)
+        worker_kwargs = dict(model_kwargs)
+        worker_kwargs["device"] = "cuda:0"
+        clf = TabICLClassifier(**worker_kwargs)
+
         ready_queue.put(
             {
                 "worker_id": worker_id,
@@ -348,44 +243,21 @@ def run_worker(
         start_event.wait()
 
         rows: List[ResultRow] = []
-        gpu_label = gpu_id
-        for item in task_items:
-            benchmark, split_kind, train_path, test_path = item
+        for benchmark, csv_path_str in task_items:
             row = evaluate_one_dataset(
                 clf,
                 benchmark=benchmark,
-                split_kind=split_kind,
-                train_path=Path(train_path),
-                test_path=Path(test_path) if test_path else None,
+                csv_path=Path(csv_path_str),
                 test_size=test_size,
                 random_state=random_state,
             )
-
-            if row.status == "fail" and is_retryable_error(row.error):
-                clear_torch_cache()
-                active_model_kwargs = make_safe_model_kwargs(active_model_kwargs, worker_out_csv, worker_id)
-                clf = build_classifier(active_model_kwargs)
-                retry_row = evaluate_one_dataset(
-                    clf,
-                    benchmark=benchmark,
-                    split_kind=split_kind,
-                    train_path=Path(train_path),
-                    test_path=Path(test_path) if test_path else None,
-                    test_size=test_size,
-                    random_state=random_state,
-                )
-                if retry_row.status == "ok":
-                    row = retry_row
-                else:
-                    row.error = f"initial={row.error} || retry={retry_row.error}"
-
             rows.append(row)
 
             if verbose:
                 if row.status == "ok":
-                    print(f"[worker {worker_id} | gpu {gpu_label}] [ok] {benchmark}/{row.dataset_id} acc={row.accuracy:.6f}")
+                    print(f"[worker {worker_id} | gpu {gpu_id}] [ok] {benchmark}/{row.dataset_name} acc={row.accuracy:.6f}")
                 else:
-                    print(f"[worker {worker_id} | gpu {gpu_label}] [fail] {benchmark}/{row.dataset_id} error={row.error}")
+                    print(f"[worker {worker_id} | gpu {gpu_id}] [fail] {benchmark}/{row.dataset_name} error={row.error}")
             clear_torch_cache()
 
         columns = list(ResultRow.__annotations__.keys())
@@ -408,6 +280,8 @@ def run_worker(
                 {
                     "benchmark": "__worker__",
                     "dataset_id": f"__WORKER_CRASH__{worker_id}",
+                    "dataset_dir": "__worker__",
+                    "dataset_name": f"__WORKER_CRASH__{worker_id}",
                     "n_train": 0,
                     "n_test": 0,
                     "n_features": 0,
@@ -452,7 +326,7 @@ def write_summary(summary_path: Path, result_df: pd.DataFrame, discovered_datase
     ]
 
     if len(failed_df):
-        failed_names = ", ".join(sorted(set(failed_df["dataset_id"].dropna().astype(str).tolist())))
+        failed_names = ", ".join(sorted(set(failed_df["dataset_name"].dropna().astype(str).tolist())))
         lines.append(f"failed_datasets: {failed_names}")
     else:
         lines.append("failed_datasets: (none)")
@@ -468,7 +342,7 @@ def main() -> None:
     parser.add_argument("--model-path", default="ckpt/TabICLv2/tabicl-classifier-v2-20260212.ckpt")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--n-estimators", type=int, default=32)
     parser.add_argument("--norm-methods", default="none,power")
     parser.add_argument("--feat-shuffle", default="latin")
@@ -482,7 +356,6 @@ def main() -> None:
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-class-shift", action="store_true")
     parser.add_argument("--no-average-logits", action="store_true")
-    parser.add_argument("--small-first", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -507,16 +380,15 @@ def main() -> None:
 
     benchmark_specs = [x.strip() for x in args.benchmarks.split(",") if x.strip()]
     benchmark_names = [name for name, _ in parse_benchmark_specs(root, benchmark_specs)]
-    tasks, discovered = build_tasks(root, benchmark_specs, largest_first=not args.small_first)
+    tasks, discovered = build_tasks(root, benchmark_specs)
     if not tasks:
-        raise FileNotFoundError("No classification datasets found in the configured benchmark directories.")
+        raise FileNotFoundError("No single-file classification CSVs found in the configured benchmark directories.")
 
     gpu_ids = [int(x.strip()) for x in args.gpus.split(",") if x.strip()]
     if len(gpu_ids) != args.workers:
         raise ValueError(f"--gpus must contain exactly {args.workers} ids")
 
     norm_methods = [x.strip() for x in args.norm_methods.split(",") if x.strip()]
-    disk_offload_dir = args.disk_offload_dir or str(out_dir / "_disk_offload")
     model_kwargs: Dict = {
         "model_path": str(model_path),
         "allow_auto_download": False,
@@ -530,12 +402,13 @@ def main() -> None:
         "use_amp": not args.no_amp,
         "use_fa3": args.use_fa3,
         "offload_mode": args.offload_mode,
-        "disk_offload_dir": disk_offload_dir,
         "verbose": False,
         "random_state": args.random_state,
     }
     if args.kv_cache != "none":
         model_kwargs["kv_cache"] = args.kv_cache
+    if args.disk_offload_dir:
+        model_kwargs["disk_offload_dir"] = str(Path(args.disk_offload_dir).expanduser())
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -608,7 +481,6 @@ def main() -> None:
         proc.join()
 
     dfs = collect_worker_outputs(out_dir, args.workers)
-
     columns = list(ResultRow.__annotations__.keys())
     all_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=columns)
     all_csv = out_dir / "all_classification_results.csv"
