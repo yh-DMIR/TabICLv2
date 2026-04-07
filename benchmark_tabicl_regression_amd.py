@@ -72,6 +72,26 @@ def find_csv_files(data_dirs: List[Path]) -> List[Path]:
     return csv_files
 
 
+def collect_torch_diagnostics() -> Dict[str, object]:
+    import torch
+
+    try:
+        device_count = torch.cuda.device_count()
+    except Exception as exc:
+        device_count = f"error: {exc}"
+
+    return {
+        "torch_version": torch.__version__,
+        "torch_cuda_version": getattr(torch.version, "cuda", None),
+        "torch_hip_version": getattr(torch.version, "hip", None),
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_device_count": device_count,
+        "HIP_VISIBLE_DEVICES": os.environ.get("HIP_VISIBLE_DEVICES"),
+        "ROCR_VISIBLE_DEVICES": os.environ.get("ROCR_VISIBLE_DEVICES"),
+        "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    }
+
+
 def evaluate_one_dataset(regressor, csv_path: Path, test_size: float, random_state: int) -> ResultRow:
     try:
         df = pd.read_csv(csv_path)
@@ -149,9 +169,21 @@ def worker_main(
     verbose: bool,
 ) -> None:
     try:
-        os.environ["HIP_VISIBLE_DEVICES"] = str(gpu_id)
+        gpu_id_str = str(gpu_id)
+        os.environ["HIP_VISIBLE_DEVICES"] = gpu_id_str
+        os.environ["ROCR_VISIBLE_DEVICES"] = gpu_id_str
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id_str
         os.environ.setdefault("OMP_NUM_THREADS", "1")
         os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+        import torch
+
+        torch_diag = collect_torch_diagnostics()
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "GPU backend is not available in this worker. "
+                f"Diagnostics: {json.dumps(torch_diag, ensure_ascii=False)}"
+            )
 
         from tabicl import TabICLRegressor
 
