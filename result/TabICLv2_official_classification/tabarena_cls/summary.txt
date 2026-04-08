@@ -1,9 +1,9 @@
 discovered_datasets: 38
 processed_datasets: 38
-ok_count: 33
-failed_count: 5
-avg_accuracy_ok: 0.891465
-avg_f1_weighted_ok: 0.879464
-avg_logloss_ok: 0.263022
-wall_seconds: 578.741
-failed_datasets: 46911__Bank_Customer_Churn.csv, 46921__diabetes.csv, 46935__HR_Analytics_Job_Change_of_Data_Scientists.csv, 46952__qsar-biodeg.csv, 46979__jm1.csv
+ok_count: 38
+failed_count: 0
+avg_accuracy_ok: 0.882737
+avg_f1_weighted_ok: 0.870703
+avg_logloss_ok: 0.277259
+wall_seconds: 11204.068
+failed_datasets: (none)

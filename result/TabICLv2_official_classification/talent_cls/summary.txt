@@ -1,9 +1,9 @@
 discovered_datasets: 200
 processed_datasets: 200
-ok_count: 175
-failed_count: 25
-avg_accuracy_ok: 0.850021
-avg_f1_weighted_ok: 0.841597
-avg_logloss_ok: 0.352716
-wall_seconds: 578.741
-failed_datasets: Bank_Customer_Churn_Dataset.csv, Contaminant-detection-in-packaged-cocoa-hazelnut-spread-jars-using-Microwaves-Sensing-and-Machine-Learning-9.0GHz_Urbinati.csv, FOREX_audcad-day-High.csv, FOREX_cadjpy-hour-High.csv, Heart-Disease-Dataset-_Comprehensive.csv, KDDCup09_upselling.csv, PhishingWebsites.csv, Shipping.csv, accelerometer.csv, analcatdata_authorship.csv, churn.csv, customer_satisfaction_in_airline.csv, eeg-eye-state.csv, golf_play_dataset_extended.csv, internet_firewall.csv, kr-vs-kp.csv, maternal_health_risk.csv, microaggregation2.csv, one-hundred-plants-texture.csv, pc4.csv, rl.csv, spambase.csv, telco-customer-churn.csv, walking-activity.csv, wine.csv
+ok_count: 200
+failed_count: 0
+avg_accuracy_ok: 0.852231
+avg_f1_weighted_ok: 0.844369
+avg_logloss_ok: 0.344574
+wall_seconds: 11204.068
+failed_datasets: (none)
